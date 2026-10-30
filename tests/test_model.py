@@ -144,13 +144,16 @@ class ClientIdentityTest(unittest.TestCase):
         derive(cur, prev, columns=5)
         self.assertEqual(cur.processes[0].util, 0.0)
 
-    def test_context_identity_includes_hwctx_id(self):
+    def test_context_identity_survives_hwctx_slot_change(self):
         def c(cid, hw, compl):
             x = ctx(10)
             return HwContext(**{**x.__dict__, "context_id": cid, "hwctx_id": hw, "completions": compl})
 
-        prev = sample(0.0, {10: 0}, contexts=[c(0, 1, 100)])
+        prev = sample(0.0, {10: 0}, contexts=[c(0, 0, 100)])
         derive(prev, None, columns=5)
-        cur = sample(1.0, {10: 0}, contexts=[c(0, 2, 300)])  # same context_id, different hw slot
+        cur = sample(1.0, {10: 0}, contexts=[c(0, 5, 300)])  # connected to slot 5 since last sample
         derive(cur, prev, columns=5)
-        self.assertEqual(cur.cmds_per_s, 0.0)
+        self.assertEqual(cur.cmds_per_s, 200.0)
+        recreated = sample(2.0, {10: 0}, contexts=[c(0, 5, 20)])  # same ids, counter restarted
+        derive(recreated, cur, columns=5)
+        self.assertEqual(recreated.cmds_per_s, 0.0)

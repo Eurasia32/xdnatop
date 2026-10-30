@@ -63,11 +63,41 @@ forked helper and abandons it after `--ioctl-timeout` seconds (default 3), conti
 and sysfs only. The abandoned helper stays in `D` state until the driver releases it; that is a
 driver condition, not something user space can clean up.
 
+## Verified on hardware
+
+NPU Phoenix (Ryzen 7040), kernel 7.3.0-rc2, xrt-amdxdna DKMS 2.21 with the `num_rqs` fix below,
+load from `tools/npu_load.py` (the xrt-smi throughput recipe replayed for a chosen duration):
+
+| load | xdnatop NPU% | xdnatop CMD/s | generator op/s |
+|---|---|---|---|
+| 8 commands in flight, 100% duty | 94.5 | 32693 | 32715 |
+| 8 in flight, 50% duty | 40.2 | 13290 | 13288 |
+
+COLS% read 100 (all 5 columns held by the one context); `k` + `y` in the TUI terminated the load
+process through its pidfd.
+
 ## Development
 
 ```sh
 python3 -m unittest -v
+ruff check . && ruff format --check .
 ```
+
+To exercise the monitor on real hardware, extract XRT's validate binaries and run the load
+generator with the Python build that matches `/opt/xilinx/xrt/python`:
+
+```sh
+mkdir /tmp/bins && (cd /tmp/bins && ar x /opt/xilinx/xrt/share/amdxdna/bins/xrt_smi_phx.a)
+python3.13 tools/npu_load.py --bins /tmp/bins --seconds 30 --duty 0.5
+```
+
+### xrt-amdxdna 2.21 on kernel 7.3+
+
+The 2.21 DKMS driver initialises `drm_sched_init_args` without `.num_rqs`. Kernels from 7.3 on
+reject that (`entity with out-of-bounds priority:2 num_user_rqs:0` in dmesg) inside a workqueue
+that holds the driver's `dev_lock`, after which every `open()` of the device blocks forever and
+the only way out is a reboot. Add `.num_rqs = DRM_SCHED_PRIORITY_COUNT,` to the initializer in
+`driver/amdxdna/aie2_hwctx.c` and rebuild the module. The upstream in-tree driver already sets it.
 
 ## License
 

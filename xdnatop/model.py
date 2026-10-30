@@ -71,14 +71,15 @@ class Sample:
         return self.ioctl.error
 
 
-def _ctx_key(ctx: HwContext) -> tuple[int, int, int]:
+def _ctx_key(ctx: HwContext) -> tuple[int, int]:
     """Identity of a hardware context across samples.
 
-    context_id is per-client and reused; hwctx_id is the firmware slot. A
-    context that was destroyed and recreated with the same ids but a lower
-    completion count is caught by the monotonic check in the caller.
+    (pid, context_id) only: hwctx_id is the firmware slot and changes when the
+    runqueue connects or migrates the context (observed 0 -> 5 at first
+    connect on xrt-amdxdna 2.21). A context destroyed and recreated with the
+    same context_id is caught by the monotonic completions check in the caller.
     """
-    return (ctx.pid, ctx.context_id, ctx.hwctx_id)
+    return (ctx.pid, ctx.context_id)
 
 
 def _ratio(delta: int, interval_ns: float) -> float:
