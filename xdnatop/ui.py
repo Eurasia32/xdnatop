@@ -225,6 +225,13 @@ def draw(stdscr: curses.window, mon: Monitor, sample: Sample, colors: Colors, in
     stdscr.refresh()
 
 
+def _close_kill(pending: tuple[int, int] | None) -> None:
+    if pending is not None:
+        with contextlib.suppress(OSError):
+            os.close(pending[1])
+    return None
+
+
 def run(stdscr: curses.window, mon: Monitor, interval: float) -> None:
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -233,7 +240,7 @@ def run(stdscr: curses.window, mon: Monitor, interval: float) -> None:
     selected = 0
     sample = mon.poll()
     next_poll = time.monotonic() + interval
-    kill_pending: int | None = None
+    kill_pending: tuple[int, int] | None = None  # (pid, pidfd)
     while True:
         key = stdscr.getch()
         if key in (ord("q"), ord("Q"), 27):
@@ -245,13 +252,18 @@ def run(stdscr: curses.window, mon: Monitor, interval: float) -> None:
         elif key == curses.KEY_DOWN:
             selected = min(max(0, len(sample.processes) - 1), selected + 1)
         elif key in (ord("k"), ord("K")) and sample.processes:
-            kill_pending = sample.processes[min(selected, len(sample.processes) - 1)].pid
+            kill_pending = _close_kill(kill_pending)
+            pid = sample.processes[min(selected, len(sample.processes) - 1)].pid
+            # A pidfd pins the identity of the process we showed; if it exits and
+            # the pid is reused before the user confirms, the signal goes nowhere.
+            with contextlib.suppress(OSError):
+                kill_pending = (pid, os.pidfd_open(pid))
         elif kill_pending is not None and key in (ord("y"), ord("Y")):
             with contextlib.suppress(OSError):
-                os.kill(kill_pending, signal.SIGTERM)
-            kill_pending = None
+                signal.pidfd_send_signal(kill_pending[1], signal.SIGTERM)
+            kill_pending = _close_kill(kill_pending)
         elif key != -1 and kill_pending is not None:
-            kill_pending = None
+            kill_pending = _close_kill(kill_pending)
 
         now = time.monotonic()
         if now >= next_poll:
@@ -265,7 +277,7 @@ def run(stdscr: curses.window, mon: Monitor, interval: float) -> None:
                 stdscr,
                 h - 1,
                 0,
-                clip(f" send SIGTERM to pid {kill_pending}? y/n ", w),
+                clip(f" send SIGTERM to pid {kill_pending[0]}? y/n ", w),
                 colors.pct(100) | curses.A_REVERSE,
             )
             stdscr.refresh()

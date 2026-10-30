@@ -12,6 +12,7 @@ from .collectors import (
     FdinfoScan,
     IoctlCollector,
     IoctlSample,
+    ProcessUsage,
     RuntimePm,
     read_runtime_pm,
     scan_fdinfo,
@@ -70,6 +71,16 @@ class Sample:
         return self.ioctl.error
 
 
+def _ctx_key(ctx: HwContext) -> tuple[int, int, int]:
+    """Identity of a hardware context across samples.
+
+    context_id is per-client and reused; hwctx_id is the firmware slot. A
+    context that was destroyed and recreated with the same ids but a lower
+    completion count is caught by the monotonic check in the caller.
+    """
+    return (ctx.pid, ctx.context_id, ctx.hwctx_id)
+
+
 def _ratio(delta: int, interval_ns: float) -> float:
     if interval_ns <= 0 or delta < 0:
         return 0.0
@@ -83,14 +94,18 @@ def derive(current: Sample, previous: Sample | None, columns: int, fdinfo_busy: 
     (None = not known yet). Without it the device number falls back to the
     runtime-PM active share and per-process utilization is NaN.
     """
-    prev_busy: dict[int, int] = {}
-    prev_compl: dict[tuple[int, int], int] = {}
+    # Busy time is tracked per DRM client (drm-client-id is unique for the
+    # driver's lifetime), never per pid: pids get reused and one process may
+    # open the device several times.
+    prev_busy: dict[tuple[int, int], int] = {}
+    prev_compl: dict[tuple[int, int, int], int] = {}
     if previous is not None:
         current.interval = max(0.0, current.ts - previous.ts)
         for pid, proc in previous.fdinfo.processes.items():
-            prev_busy[pid] = proc.busy_ns
+            for cid, client in proc.clients.items():
+                prev_busy[(pid, cid)] = client.busy_ns
         for ctx in previous.ioctl.contexts:
-            prev_compl[(ctx.pid, ctx.context_id)] = ctx.completions
+            prev_compl[_ctx_key(ctx)] = ctx.completions
     interval = current.interval
     interval_ns = interval * 1e9
 
@@ -102,10 +117,20 @@ def derive(current: Sample, previous: Sample | None, columns: int, fdinfo_busy: 
             return 0.0
         delta = 0
         for ctx in ctxs:
-            old = prev_compl.get((ctx.pid, ctx.context_id))
+            old = prev_compl.get(_ctx_key(ctx))
             if old is not None and ctx.completions >= old:
                 delta += ctx.completions - old
         return delta / interval
+
+    def busy_delta(pid: int, proc: ProcessUsage) -> int:
+        delta = 0
+        for cid, client in proc.clients.items():
+            old = prev_busy.get((pid, cid))
+            if old is not None and client.busy_ns >= old:
+                delta += client.busy_ns - old
+            # Unknown client (new since last sample) or a counter that went
+            # backwards (client id reused after a driver reload): no delta.
+        return delta
 
     ctx_by_pid: dict[int, list[HwContext]] = {}
     for ctx in current.ioctl.contexts:
@@ -115,9 +140,7 @@ def derive(current: Sample, previous: Sample | None, columns: int, fdinfo_busy: 
     total_delta = 0
     nan = float("nan")
     for pid, proc in current.fdinfo.processes.items():
-        delta = proc.busy_ns - prev_busy.get(pid, proc.busy_ns)
-        if pid in prev_busy and delta < 0:
-            delta = 0  # client restarted (new client id) between samples
+        delta = busy_delta(pid, proc)
         total_delta += delta
         ctxs = ctx_by_pid.pop(pid, [])
         if fdinfo_busy and previous is not None:

@@ -116,3 +116,41 @@ class FallbackTest(unittest.TestCase):
         self.assertAlmostEqual(by_pid[10].cmds_per_s, 30.0)
         self.assertAlmostEqual(by_pid[20].cmds_per_s, 0.0)  # counter went backwards: ignored
         self.assertAlmostEqual(cur.cmds_per_s, 30.0)
+
+
+class ClientIdentityTest(unittest.TestCase):
+    def multi(self, ts, clients, pid=10):
+        s = sample(ts, {})
+        s.fdinfo.processes[pid] = ProcessUsage(
+            pid=pid,
+            command="app",
+            clients={cid: FdinfoClient(client_id=cid, engines_ns={"npu": ns}) for cid, ns in clients.items()},
+        )
+        return s
+
+    def test_client_restart_keeps_other_clients_delta(self):
+        prev = self.multi(0.0, {1: 1_000_000_000, 2: 1_000_000_000})
+        derive(prev, None, columns=5)
+        # client 2 closed and reopened as client 3 with a fresh counter; client 1 kept working
+        cur = self.multi(1.0, {1: 1_500_000_000, 3: 100_000_000})
+        derive(cur, prev, columns=5)
+        self.assertAlmostEqual(cur.processes[0].util, 50.0)
+        self.assertAlmostEqual(cur.util, 50.0)
+
+    def test_pid_reuse_does_not_inherit_counter(self):
+        prev = self.multi(0.0, {1: 5_000_000_000})
+        derive(prev, None, columns=5)
+        cur = self.multi(1.0, {9: 900_000_000})  # new process, same pid, new client id
+        derive(cur, prev, columns=5)
+        self.assertEqual(cur.processes[0].util, 0.0)
+
+    def test_context_identity_includes_hwctx_id(self):
+        def c(cid, hw, compl):
+            x = ctx(10)
+            return HwContext(**{**x.__dict__, "context_id": cid, "hwctx_id": hw, "completions": compl})
+
+        prev = sample(0.0, {10: 0}, contexts=[c(0, 1, 100)])
+        derive(prev, None, columns=5)
+        cur = sample(1.0, {10: 0}, contexts=[c(0, 2, 300)])  # same context_id, different hw slot
+        derive(cur, prev, columns=5)
+        self.assertEqual(cur.cmds_per_s, 0.0)

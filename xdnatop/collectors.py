@@ -12,6 +12,7 @@ import pickle
 import pwd
 import re
 import select
+import signal
 import struct
 import time
 from dataclasses import dataclass, field
@@ -193,8 +194,11 @@ class FdinfoScan:
     unreadable_fd_dirs: int = 0  # /proc/<pid>/fd itself not listable (other users, no root)
 
 
-def proc_command(pid: int) -> str:
-    for path, limit in ((f"/proc/{pid}/cmdline", 512), (f"/proc/{pid}/comm", 64)):
+PROC_ROOT = "/proc"
+
+
+def proc_command(pid: int, proc_root: str = PROC_ROOT) -> str:
+    for path, limit in ((f"{proc_root}/{pid}/cmdline", 512), (f"{proc_root}/{pid}/comm", 64)):
         try:
             with open(path, "rb") as fh:
                 data = fh.read(limit)
@@ -206,9 +210,9 @@ def proc_command(pid: int) -> str:
     return ""
 
 
-def proc_user(pid: int) -> str:
+def proc_user(pid: int, proc_root: str = PROC_ROOT) -> str:
     try:
-        uid = os.stat(f"/proc/{pid}").st_uid
+        uid = os.stat(f"{proc_root}/{pid}").st_uid
     except OSError:
         return ""
     try:
@@ -217,7 +221,7 @@ def proc_user(pid: int) -> str:
         return str(uid)
 
 
-def scan_fdinfo(device_index: int | None = None, skip_pid: int | None = None) -> FdinfoScan:
+def scan_fdinfo(device_index: int | None = None, skip_pid: int | None = None, proc_root: str = PROC_ROOT) -> FdinfoScan:
     """Find every process holding /dev/accel/accelN open and read its DRM fdinfo.
 
     Clients are de-duplicated by drm-client-id so dup()'d or inherited fds are
@@ -226,7 +230,7 @@ def scan_fdinfo(device_index: int | None = None, skip_pid: int | None = None) ->
     """
     scan = FdinfoScan()
     try:
-        entries = os.listdir("/proc")
+        entries = os.listdir(proc_root)
     except OSError:
         return scan
     for name in entries:
@@ -235,7 +239,7 @@ def scan_fdinfo(device_index: int | None = None, skip_pid: int | None = None) ->
         pid = int(name)
         if pid == skip_pid:
             continue
-        fd_dir = f"/proc/{pid}/fd"
+        fd_dir = f"{proc_root}/{pid}/fd"
         try:
             fds = os.listdir(fd_dir)
         except PermissionError:
@@ -254,7 +258,7 @@ def scan_fdinfo(device_index: int | None = None, skip_pid: int | None = None) ->
             if not m or (device_index is not None and int(m.group(1)) != device_index):
                 continue
             try:
-                with open(f"/proc/{pid}/fdinfo/{fd}", encoding="utf-8") as fh:
+                with open(f"{proc_root}/{pid}/fdinfo/{fd}", encoding="utf-8") as fh:
                     client = parse_fdinfo(fh.read())
             except OSError as exc:
                 if exc.errno in (errno.EACCES, errno.EPERM):
@@ -266,8 +270,8 @@ def scan_fdinfo(device_index: int | None = None, skip_pid: int | None = None) ->
                 usage = ProcessUsage(pid=pid)
             usage.clients.setdefault(client.client_id, client)
         if usage is not None:
-            usage.command = proc_command(pid)
-            usage.user = proc_user(pid)
+            usage.command = proc_command(pid, proc_root)
+            usage.user = proc_user(pid, proc_root)
             scan.processes[pid] = usage
         elif denied:
             scan.denied_pids.append(pid)
@@ -286,6 +290,26 @@ class IoctlSample:
     skipped: bool = False  # no client had the device open, query not issued
 
 
+# Largest helper message we accept: 64 contexts * 144 B plus pickle overhead is
+# well under this; anything bigger means a corrupted stream.
+MAX_HELPER_MSG = 1 << 20
+
+
+def _frame(obj: object) -> bytes:
+    data = pickle.dumps(obj)
+    if len(data) > MAX_HELPER_MSG:
+        raise ValueError(f"helper message too large: {len(data)} bytes")
+    return struct.pack("<I", len(data)) + data
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """os.write on a blocking pipe may return short if interrupted by a signal."""
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
+
+
 def _ioctl_worker(rfd: int, wfd: int, dev_path: str) -> None:  # pragma: no cover - runs in child
     """Child process: owns the device fd and answers requests from the parent.
 
@@ -296,8 +320,7 @@ def _ioctl_worker(rfd: int, wfd: int, dev_path: str) -> None:  # pragma: no cove
     """
 
     def send(obj: object) -> None:
-        data = pickle.dumps(obj)
-        os.write(wfd, struct.pack("<I", len(data)) + data)
+        _write_all(wfd, _frame(obj))
 
     try:
         dev = uapi.AmdxdnaDevice(dev_path)
@@ -349,9 +372,10 @@ class IoctlCollector:
     handler would join it forever.
     """
 
-    def __init__(self, dev: DeviceStatic, timeout: float = 3.0, enabled: bool = True) -> None:
+    def __init__(self, dev: DeviceStatic, timeout: float = 3.0, enabled: bool = True, worker=None) -> None:
         self.static = dev
         self.timeout = timeout
+        self._worker = worker or _ioctl_worker  # injectable for tests
         self.error = ""
         self.hung = False
         self._pid = 0
@@ -368,7 +392,7 @@ class IoctlCollector:
             os.close(rsp_r)
             code = 0
             try:
-                _ioctl_worker(req_r, rsp_w, dev.dev_path)
+                self._worker(req_r, rsp_w, dev.dev_path)
             except BaseException:  # noqa: BLE001 - never unwind into the parent's atexit handlers
                 code = 1
             finally:
@@ -381,11 +405,16 @@ class IoctlCollector:
             return
         kind, payload = msg
         if kind == "open_error":
-            self.error = payload
+            self.error = str(payload)
+            self._shutdown()
+            return
+        if kind != "static" or not isinstance(payload, dict):
+            self.error = f"ioctl helper handshake failed ({kind})"
             self._shutdown()
             return
         for key, value in payload.items():
-            setattr(dev, key, value)
+            if hasattr(dev, key):
+                setattr(dev, key, value)
 
     def _read_exact(self, n: int, deadline: float) -> bytes | None:
         buf = b""
@@ -405,9 +434,14 @@ class IoctlCollector:
         deadline = time.monotonic() + self.timeout
         try:
             header = self._read_exact(4, deadline)
-            body = self._read_exact(struct.unpack("<I", header)[0], deadline) if header else None
-        except (EOFError, OSError) as exc:
-            self.error = f"ioctl helper exited ({exc.__class__.__name__})"
+            body = None
+            if header:
+                length = struct.unpack("<I", header)[0]
+                if length > MAX_HELPER_MSG:
+                    raise ValueError(f"helper message length {length} exceeds limit")
+                body = self._read_exact(length, deadline)
+        except (EOFError, OSError, ValueError) as exc:
+            self.error = f"ioctl helper exited ({exc.__class__.__name__}: {exc})"
             self._shutdown()
             return None
         if body is None:
@@ -415,7 +449,17 @@ class IoctlCollector:
             self.error = f"amdxdna ioctl did not return within {self.timeout:.0f}s (driver dev_lock held? see dmesg)"
             self._abandon()
             return None
-        return pickle.loads(body)
+        try:
+            msg = pickle.loads(body)
+        except Exception as exc:  # noqa: BLE001 - any unpickling failure means a corrupt stream
+            self.error = f"ioctl helper sent a corrupt message ({exc.__class__.__name__})"
+            self._shutdown()
+            return None
+        if not (isinstance(msg, tuple) and len(msg) == 2 and isinstance(msg[0], str)):
+            self.error = "ioctl helper sent an unexpected message"
+            self._shutdown()
+            return None
+        return msg
 
     @property
     def available(self) -> bool:
@@ -443,6 +487,11 @@ class IoctlCollector:
         if msg is None:
             out.error = self.error
             return out
+        if msg[0] != "sample" or not isinstance(msg[1], IoctlSample):
+            self.error = f"ioctl helper sent an unexpected reply ({msg[0]})"
+            self._shutdown()
+            out.error = self.error
+            return out
         return msg[1]
 
     def _close_fds(self) -> None:
@@ -452,9 +501,14 @@ class IoctlCollector:
         self._rfd = self._wfd = -1
 
     def _abandon(self) -> None:
-        # The child is blocked in the kernel and cannot be killed while in D state.
-        # Drop the pipes; it exits on its own if the driver ever releases it.
+        # The child is most likely blocked in the kernel; SIGKILL is harmless there
+        # (it is delivered once the driver releases it) and reaps it immediately if
+        # it was merely slow. Do not wait on it either way.
         self._close_fds()
+        if self._pid:
+            with contextlib.suppress(OSError):
+                os.kill(self._pid, signal.SIGKILL)
+                os.waitpid(self._pid, os.WNOHANG)
         self._pid = 0
 
     def _shutdown(self) -> None:
