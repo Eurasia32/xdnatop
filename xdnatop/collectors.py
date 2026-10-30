@@ -290,6 +290,7 @@ def scan_fdinfo(
 class IoctlSample:
     contexts: list[uapi.HwContext] = field(default_factory=list)
     power_mode: str = ""
+    clocks: dict[str, int] = field(default_factory=dict)  # live DPM clocks, change with load
     tops_curr: int = 0
     error: str = ""
     skipped: bool = False  # no client had the device open, query not issued
@@ -365,6 +366,8 @@ def _ioctl_worker(rfd: int, wfd: int, dev_path: str) -> None:  # pragma: no cove
             out.error = f"GET_ARRAY: {exc.strerror}"
         with contextlib.suppress(OSError):
             out.power_mode = dev.power_mode()
+        with contextlib.suppress(OSError):
+            out.clocks = dev.clocks()
         send(("sample", out))
     dev.close()
 
@@ -485,6 +488,7 @@ class IoctlCollector:
             # skip the query so the monitor does not keep the NPU out of runtime suspend.
             out.skipped = True
             out.power_mode = str(self.static.power_mode)
+            out.clocks = dict(self.static.clocks)
             return out
         try:
             os.write(self._wfd, b"s")

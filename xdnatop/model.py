@@ -242,7 +242,11 @@ class Monitor:
         if want_ctx:
             ioctl = self.ioctl.sample(True)
         else:
-            ioctl = IoctlSample(skipped=True, contexts=list(self.current.ioctl.contexts) if self.current else [])
+            ioctl = IoctlSample(
+                skipped=True,
+                contexts=list(self.current.ioctl.contexts) if self.current else [],
+                clocks=dict(self.current.ioctl.clocks) if self.current else dict(self.static.clocks),
+            )
         sample = Sample(ts=time.monotonic(), pm=pm, fdinfo=fdinfo, ioctl=ioctl)
         derive(sample, self.current, self.static.columns, self.fdinfo_busy)
         self.previous, self.current = self.current, sample

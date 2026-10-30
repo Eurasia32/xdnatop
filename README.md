@@ -10,6 +10,32 @@ It reads the same kernel interfaces nvtop uses for GPUs instead of parsing `xrt-
 | `DRM_IOCTL_AMDXDNA_GET_ARRAY` / `GET_INFO` | hardware contexts (pid, columns, submissions, completions, errors, state), power mode, clocks, AIE geometry, firmware | any user with access to `/dev/accel/accelN` |
 | `/sys/class/accel/accelN/device` | device name, firmware, runtime PM state and counters | any user |
 
+```
+ xdnatop  NPU Phoenix  [0000:66:00.1]                     01:51:59  0.5s  q quit  ↑↓ select  k kill
+┌─ Device ─────────────────────────┐ ┌─ Utilization ───────────────────────────────────────────────┐
+│ driver   amdxdna   fw 1.5.5.391  │ │ NPU   56.1%  ██████████████████████░░░░░░░░░░░░░░░░░        │
+│ AIE      v1.1  5 cols x 6 rows   │ │ COLS 100.0%  ███████████████████████████████████████        │
+│ power    default   max 10 TOPS   │ │ PM   100.0%  ███████████████████████████████████████        │
+│ clocks   MP-NPU:960MHz H:1800MHz │ │ CMD/s  16503.5   (completed commands, all contexts)         │
+│ PM       active    active 100.0% │ │ NPU%  = Δ drm-engine busy time / wall time (fdinfo, exact)  │
+│ contexts 1 total, 1 active       │ │ COLS% = AIE columns held by active hw contexts              │
+│ clients  1                       │ │ PM%   = PCI runtime-active share of interval (sysfs)        │
+└──────────────────────────────────┘ └─────────────────────────────────────────────────────────────┘
+┌─ NPU utilization history ────────────────────────────────────────────────────────────────────────┐
+│                                                                                             100% │
+│                                                                                                  │
+│                                                                                    ▂▃▃▃▃▃▃▃▃▃▃▃▃ │
+│                                                                                    █████████████ │
+│                                                                                    █████████████ │
+│                                                                                    █████████  0% │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─ Processes ──────────────────────────────────────────────────────────────────────────────────────┐
+│    PID USER      NPU%   CMD/s  COLS  MEM      CTX  SUBMIT    COMPL   ERR  COMMAND                │
+│  25702 lk         56.1 16503.5     5  64.1MiB     1   163920   163917     0  python3.13 tools/np │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ 1 clients  interval 0.52s
+```
+
 ## Metrics
 
 - **NPU%** is the share of wall time the driver had at least one job in flight. Its source depends

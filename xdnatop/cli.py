@@ -18,7 +18,7 @@ def print_once(mon: Monitor, interval: float, width: int = 120) -> int:
     time.sleep(interval)
     s = mon.poll()
     st = mon.static
-    clocks = "  ".join(f"{k}: {v} MHz" for k, v in st.clocks.items())
+    clocks = "  ".join(f"{k}: {v} MHz" for k, v in (s.ioctl.clocks or st.clocks).items())
     print(f"{st.name} [{st.pci_bdf}]  driver {st.driver}  fw {st.fw_version}  AIE v{st.aie_version}")
     print(f"columns {st.columns}  rows {st.rows}  power mode {s.ioctl.power_mode or st.power_mode}  {clocks}")
     print(

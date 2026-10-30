@@ -134,7 +134,7 @@ def draw(stdscr: curses.window, mon: Monitor, sample: Sample, colors: Colors, in
     left_w = max(36, min(48, w // 3))
     card_h = 9
     _box(stdscr, 1, 0, card_h, left_w, "Device")
-    clocks = "  ".join(f"{k.replace(' Clock', '')}:{v}MHz" for k, v in st.clocks.items())
+    clocks = " ".join(f"{k.replace(' Clock', '')}:{v}MHz" for k, v in (sample.ioctl.clocks or st.clocks).items())
     lines = [
         f"driver   {st.driver}   fw {st.fw_version}",
         f"AIE      v{st.aie_version}  {st.columns} cols x {st.rows} rows",
