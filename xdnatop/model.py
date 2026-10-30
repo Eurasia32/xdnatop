@@ -229,7 +229,8 @@ class Monitor:
 
     def poll(self) -> Sample:
         pm = read_runtime_pm(self.static.sysfs_path)
-        fdinfo = scan_fdinfo(self.static.index, skip_pid=self._self_pid)
+        own = {self._self_pid, self.ioctl.helper_pid} - {0}
+        fdinfo = scan_fdinfo(self.static.index, skip_pids=frozenset(own))
         if self.fdinfo_busy is None and fdinfo.processes:
             self.fdinfo_busy = any(p.has_engine_stats for p in fdinfo.processes.values())
         have_clients = bool(fdinfo.processes or fdinfo.denied_pids or fdinfo.unreadable_fd_dirs)

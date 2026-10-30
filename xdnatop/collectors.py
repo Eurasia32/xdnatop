@@ -221,7 +221,12 @@ def proc_user(pid: int, proc_root: str = PROC_ROOT) -> str:
         return str(uid)
 
 
-def scan_fdinfo(device_index: int | None = None, skip_pid: int | None = None, proc_root: str = PROC_ROOT) -> FdinfoScan:
+def scan_fdinfo(
+    device_index: int | None = None,
+    skip_pid: int | None = None,
+    proc_root: str = PROC_ROOT,
+    skip_pids: frozenset[int] = frozenset(),
+) -> FdinfoScan:
     """Find every process holding /dev/accel/accelN open and read its DRM fdinfo.
 
     Clients are de-duplicated by drm-client-id so dup()'d or inherited fds are
@@ -237,7 +242,7 @@ def scan_fdinfo(device_index: int | None = None, skip_pid: int | None = None, pr
         if not name.isdigit():
             continue
         pid = int(name)
-        if pid == skip_pid:
+        if pid == skip_pid or pid in skip_pids:
             continue
         fd_dir = f"{proc_root}/{pid}/fd"
         try:
@@ -464,6 +469,11 @@ class IoctlCollector:
     @property
     def available(self) -> bool:
         return self._rfd >= 0
+
+    @property
+    def helper_pid(self) -> int:
+        """PID of the forked helper (0 if none). It holds the device open and must be excluded from scans."""
+        return self._pid
 
     def sample(self, have_clients: bool = True) -> IoctlSample:
         out = IoctlSample()

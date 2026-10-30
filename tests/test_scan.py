@@ -71,6 +71,12 @@ class ScanTest(unittest.TestCase):
         finally:
             os.chmod(f"{self.tmp.name}/100/fd", 0o755)
 
+    def test_skip_pids_set(self):
+        self.proc.add(100, {3: ("/dev/accel/accel0", 7, 1)})
+        self.proc.add(101, {3: ("/dev/accel/accel0", 8, 1)})
+        scan = scan_fdinfo(proc_root=self.tmp.name, skip_pids=frozenset({100, 101}))
+        self.assertEqual(scan.processes, {})
+
     def test_missing_proc_root(self):
         scan = scan_fdinfo(proc_root=f"{self.tmp.name}/nope")
         self.assertEqual(scan.processes, {})
