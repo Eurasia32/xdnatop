@@ -157,3 +157,47 @@ class ClientIdentityTest(unittest.TestCase):
         recreated = sample(2.0, {10: 0}, contexts=[c(0, 5, 20)])  # same ids, counter restarted
         derive(recreated, cur, columns=5)
         self.assertEqual(recreated.cmds_per_s, 0.0)
+
+
+class ForcedSourceTest(unittest.TestCase):
+    def test_forced_pm_ignores_engine_stats(self):
+        from xdnatop.model import UTIL_PM
+
+        prev = sample(0.0, {10: 0}, pm=("active", 100, 100))
+        derive(prev, None, columns=5, fdinfo_busy=False)
+        cur = sample(1.0, {10: 900_000_000}, pm=("active", 130, 170))
+        derive(cur, prev, columns=5, fdinfo_busy=False)
+        self.assertEqual(cur.util_source, UTIL_PM)
+        self.assertAlmostEqual(cur.util, 30.0)
+        self.assertFalse(cur.processes[0].has_util)
+
+
+class CtxRefreshCadenceTest(unittest.TestCase):
+    def test_rate_spans_real_fetches_and_carries_when_skipped(self):
+        def c(compl):
+            x = ctx(10)
+            return HwContext(**{**x.__dict__, "completions": compl})
+
+        s0 = sample(0.0, {10: 0}, contexts=[c(0)])
+        s0.ioctl.ctx_ts = 100.0
+        derive(s0, None, columns=5)
+        # four polls without a refresh: contexts carried, ctx_ts unchanged
+        prev = s0
+        for t in (1.0, 2.0, 3.0, 4.0):
+            s = sample(t, {10: 0}, contexts=[c(0)])
+            s.ioctl.ctx_ts = 100.0
+            derive(s, prev, columns=5)
+            self.assertEqual(s.cmds_per_s, 0.0)
+            prev = s
+        # refresh after 5 s shows 500 completions: 100/s, not 500/s
+        s5 = sample(5.0, {10: 0}, contexts=[c(500)])
+        s5.ioctl.ctx_ts = 105.0
+        derive(s5, prev, columns=5)
+        self.assertAlmostEqual(s5.cmds_per_s, 100.0)
+        self.assertAlmostEqual(s5.processes[0].cmds_per_s, 100.0)
+        # next poll skipped again: rate carried over instead of dropping to 0
+        s6 = sample(6.0, {10: 0}, contexts=[c(500)])
+        s6.ioctl.ctx_ts = 105.0
+        derive(s6, s5, columns=5)
+        self.assertAlmostEqual(s6.cmds_per_s, 100.0)
+        self.assertAlmostEqual(s6.processes[0].cmds_per_s, 100.0)

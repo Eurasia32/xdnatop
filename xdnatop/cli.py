@@ -14,6 +14,7 @@ from .ui import PROC_HEADER, process_line, run
 
 
 def print_once(mon: Monitor, interval: float, width: int = 120) -> int:
+    mon.ctx_every = 1  # two polls only; both must query the context table for CMD/s
     mon.poll()
     time.sleep(interval)
     s = mon.poll()
@@ -53,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
         help="fdinfo + sysfs only; never open the device (no hw context table, no device wakeups)",
     )
     p.add_argument(
+        "--util-source",
+        choices=["auto", "fdinfo", "pm"],
+        default="auto",
+        help="force the NPU%% source: fdinfo busy time or runtime-PM share (default: auto-detect)",
+    )
+    p.add_argument(
         "--ctx-every",
         type=int,
         default=5,
@@ -86,7 +93,11 @@ def main(argv: list[str] | None = None) -> int:
 
     interval = max(0.1, args.interval)
     mon = Monitor(
-        dev, use_ioctl=not args.no_ioctl, ioctl_timeout=max(0.5, args.ioctl_timeout), ctx_every=args.ctx_every
+        dev,
+        use_ioctl=not args.no_ioctl,
+        ioctl_timeout=max(0.5, args.ioctl_timeout),
+        ctx_every=args.ctx_every,
+        util_source=args.util_source,
     )
     try:
         if args.once:

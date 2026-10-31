@@ -113,15 +113,27 @@ def derive(current: Sample, previous: Sample | None, columns: int, fdinfo_busy: 
     if fdinfo_busy is None:
         fdinfo_busy = any(p.has_engine_stats for p in current.fdinfo.processes.values()) or None
 
-    def ctx_rate(ctxs: list[HwContext]) -> float:
-        if previous is None or interval <= 0:
+    # Command rates span the time between two real context-table fetches (the
+    # table is only refreshed every few polls in PM-derived mode); when the
+    # table was not refreshed this poll, the previous rate is carried over.
+    ctx_interval = 0.0
+    if previous is not None and current.ioctl.ctx_ts > previous.ioctl.ctx_ts > 0:
+        ctx_interval = current.ioctl.ctx_ts - previous.ioctl.ctx_ts
+    elif previous is not None and previous.ioctl.ctx_ts == 0 and current.ioctl.ctx_ts == 0:
+        ctx_interval = interval  # ctx_ts unset (tests / no ioctl): fall back to the poll interval
+    prev_rate = {r.pid: r.cmds_per_s for r in previous.processes} if previous is not None else {}
+
+    def ctx_rate(ctxs: list[HwContext], carry: float) -> float:
+        if previous is None:
             return 0.0
+        if ctx_interval <= 0:
+            return carry
         delta = 0
         for ctx in ctxs:
             old = prev_compl.get(_ctx_key(ctx))
             if old is not None and ctx.completions >= old:
                 delta += ctx.completions - old
-        return delta / interval
+        return delta / ctx_interval
 
     def busy_delta(pid: int, proc: ProcessUsage) -> int:
         delta = 0
@@ -159,7 +171,7 @@ def derive(current: Sample, previous: Sample | None, columns: int, fdinfo_busy: 
                 util=util,
                 memory_bytes=proc.memory_bytes,
                 contexts=ctxs,
-                cmds_per_s=ctx_rate(ctxs),
+                cmds_per_s=ctx_rate(ctxs, prev_rate.get(pid, 0.0)),
             )
         )
     # Contexts whose owner we could not read via fdinfo (other users without root).
@@ -173,12 +185,12 @@ def derive(current: Sample, previous: Sample | None, columns: int, fdinfo_busy: 
                 util=nan,
                 memory_bytes=0,
                 contexts=ctxs,
-                cmds_per_s=ctx_rate(ctxs),
+                cmds_per_s=ctx_rate(ctxs, prev_rate.get(pid, 0.0)),
             )
         )
     rows.sort(key=lambda r: (-(r.util if r.has_util else -1.0), -r.cmds_per_s, -r.busy_ns, r.pid))
     current.processes = rows
-    current.cmds_per_s = ctx_rate(current.ioctl.contexts)
+    current.cmds_per_s = ctx_rate(current.ioctl.contexts, previous.cmds_per_s if previous is not None else 0.0)
 
     if previous is not None:
         a = current.pm.active_ms - previous.pm.active_ms
@@ -215,9 +227,11 @@ class Monitor:
         use_ioctl: bool = True,
         ioctl_timeout: float = 3.0,
         ctx_every: int = 5,
+        util_source: str = "auto",
     ) -> None:
         self.static = dev
         self.ctx_every = max(1, ctx_every)
+        self.forced_source = util_source  # "auto", UTIL_FDINFO or UTIL_PM
         self.ioctl = IoctlCollector(dev, timeout=ioctl_timeout, enabled=use_ioctl)
         self.previous: Sample | None = None
         self.current: Sample | None = None
@@ -225,7 +239,8 @@ class Monitor:
         self.pm_history: deque[float] = deque(maxlen=history_len)
         self._self_pid = os.getpid()
         # Learned from the first client seen: does this driver export busy time?
-        self.fdinfo_busy: bool | None = None
+        # A forced source pins it up front.
+        self.fdinfo_busy: bool | None = {UTIL_FDINFO: True, UTIL_PM: False}.get(util_source)
         self._polls = 0
 
     def poll(self) -> Sample:
@@ -241,11 +256,13 @@ class Monitor:
         self._polls += 1
         if want_ctx:
             ioctl = self.ioctl.sample(True)
+            ioctl.ctx_ts = time.monotonic()
         else:
             ioctl = IoctlSample(
                 skipped=True,
                 contexts=list(self.current.ioctl.contexts) if self.current else [],
                 clocks=dict(self.current.ioctl.clocks) if self.current else dict(self.static.clocks),
+                ctx_ts=self.current.ioctl.ctx_ts if self.current else 0.0,
             )
         sample = Sample(ts=time.monotonic(), pm=pm, fdinfo=fdinfo, ioctl=ioctl)
         derive(sample, self.current, self.static.columns, self.fdinfo_busy)

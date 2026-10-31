@@ -294,6 +294,7 @@ class IoctlSample:
     tops_curr: int = 0
     error: str = ""
     skipped: bool = False  # no client had the device open, query not issued
+    ctx_ts: float = 0.0  # monotonic time the context table was really fetched (carried when skipped)
 
 
 # Largest helper message we accept: 64 contexts * 144 B plus pickle overhead is
