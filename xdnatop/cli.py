@@ -9,7 +9,7 @@ import time
 
 from . import __version__
 from .collectors import list_accel_devices
-from .model import PM_AUTOSUSPEND_HINT_MS, UTIL_PM, Monitor
+from .model import Monitor
 from .ui import PROC_HEADER, process_line, run
 
 
@@ -24,16 +24,10 @@ def print_once(mon: Monitor, interval: float, width: int = 120) -> int:
     print(f"columns {st.columns}  rows {st.rows}  power mode {s.ioctl.power_mode or st.power_mode}  {clocks}")
     print(
         f"NPU {s.util:5.1f}% ({s.util_source})   columns {s.column_util:5.1f}%   cmd/s {s.cmds_per_s:.1f}   "
+        if s.has_util
+        else f"NPU   n/a ({s.util_source})   columns {s.column_util:5.1f}%   cmd/s {s.cmds_per_s:.1f}   "
         f"PM {s.pm.status} {s.pm_active:5.1f}%   interval {s.interval:.2f}s"
     )
-    if s.util_source == UTIL_PM and s.pm.autosuspend_delay_ms > PM_AUTOSUSPEND_HINT_MS:
-        print(
-            f"note: NPU% is runtime-PM derived and includes a {s.pm.autosuspend_delay_ms}ms idle tail per job; "
-            f"as root: echo 20 > {st.sysfs_path}/power/autosuspend_delay_ms",
-            file=sys.stderr,
-        )
-    if s.error:
-        print(f"warning: {s.error}", file=sys.stderr)
     print(PROC_HEADER)
     for row in s.processes:
         print(process_line(row, width))
@@ -55,15 +49,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--util-source",
-        choices=["auto", "fdinfo", "pm"],
+        choices=["auto", "fdinfo", "off"],
         default="auto",
-        help="force the NPU%% source: fdinfo busy time or runtime-PM share (default: auto-detect)",
+        help="force the NPU%% source: fdinfo busy time, or off to behave like a driver without it (default: auto)",
     )
     p.add_argument(
         "--ctx-every",
         type=int,
-        default=5,
-        help="in PM-derived mode, refresh the hw-context table every N polls (default 5)",
+        default=1,
+        help="refresh the hw-context table every N polls; each query wakes the device (default 1)",
     )
     p.add_argument(
         "--ioctl-timeout",

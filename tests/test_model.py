@@ -83,8 +83,8 @@ if __name__ == "__main__":
 
 
 class FallbackTest(unittest.TestCase):
-    def test_pm_derived_util_when_driver_has_no_engine_stats(self):
-        from xdnatop.model import UTIL_PM
+    def test_util_unavailable_when_driver_has_no_engine_stats(self):
+        from xdnatop.model import UTIL_UNAVAILABLE
 
         prev = sample(0.0, {}, pm=("active", 100, 100))
         prev.fdinfo.processes[10] = ProcessUsage(pid=10, command="app", clients={10: FdinfoClient(client_id=10)})
@@ -92,8 +92,9 @@ class FallbackTest(unittest.TestCase):
         cur = sample(1.0, {}, pm=("active", 160, 140))
         cur.fdinfo.processes[10] = ProcessUsage(pid=10, command="app", clients={10: FdinfoClient(client_id=10)})
         derive(cur, prev, columns=5, fdinfo_busy=False)
-        self.assertEqual(cur.util_source, UTIL_PM)
-        self.assertAlmostEqual(cur.util, 60.0)
+        self.assertEqual(cur.util_source, UTIL_UNAVAILABLE)
+        self.assertFalse(cur.has_util)
+        self.assertAlmostEqual(cur.pm_active, 60.0)  # still reported separately
         self.assertFalse(cur.processes[0].has_util)
 
     def test_fdinfo_busy_autodetected_from_engine_keys(self):
@@ -160,15 +161,16 @@ class ClientIdentityTest(unittest.TestCase):
 
 
 class ForcedSourceTest(unittest.TestCase):
-    def test_forced_pm_ignores_engine_stats(self):
-        from xdnatop.model import UTIL_PM
+    def test_forced_off_ignores_engine_stats(self):
+        from xdnatop.model import UTIL_UNAVAILABLE
 
         prev = sample(0.0, {10: 0}, pm=("active", 100, 100))
         derive(prev, None, columns=5, fdinfo_busy=False)
         cur = sample(1.0, {10: 900_000_000}, pm=("active", 130, 170))
         derive(cur, prev, columns=5, fdinfo_busy=False)
-        self.assertEqual(cur.util_source, UTIL_PM)
-        self.assertAlmostEqual(cur.util, 30.0)
+        self.assertEqual(cur.util_source, UTIL_UNAVAILABLE)
+        self.assertFalse(cur.has_util)
+        self.assertAlmostEqual(cur.pm_active, 30.0)
         self.assertFalse(cur.processes[0].has_util)
 
 

@@ -20,11 +20,8 @@ from .collectors import (
 from .uapi import HwContext
 
 UTIL_FDINFO = "fdinfo"  # Δ drm-engine busy time / Δt, per client (exact)
-UTIL_PM = "pm"  # runtime-PM active share (device only; includes autosuspend tail)
-UTIL_NONE = "none"  # nothing usable yet
-
-# Above this autosuspend delay the PM-derived number is dominated by the idle tail.
-PM_AUTOSUSPEND_HINT_MS = 100
+UTIL_UNAVAILABLE = "unavailable"  # driver exports no busy time; only CMD/s and PM awake share
+UTIL_NONE = "none"  # no client seen yet, source undecided
 
 
 @dataclass
@@ -55,7 +52,7 @@ class Sample:
     ioctl: IoctlSample
     # derived
     interval: float = 0.0
-    util: float = 0.0  # device NPU utilization, % of wall time, capped at 100
+    util: float = 0.0  # device NPU utilization, % of wall time, capped at 100; NaN when unavailable
     util_source: str = UTIL_NONE
     pm_active: float = 0.0  # % of interval the PCI device was runtime-active
     column_util: float = 0.0  # % of AIE columns held by active contexts
@@ -65,6 +62,10 @@ class Sample:
     @property
     def active_contexts(self) -> list[HwContext]:
         return [c for c in self.ioctl.contexts if c.active]
+
+    @property
+    def has_util(self) -> bool:
+        return self.util == self.util  # not NaN
 
     @property
     def error(self) -> str:
@@ -206,8 +207,12 @@ def derive(current: Sample, previous: Sample | None, columns: int, fdinfo_busy: 
         current.util_source = UTIL_FDINFO
         current.util = _ratio(total_delta, interval_ns) if previous is not None else 0.0
     elif fdinfo_busy is False:
-        current.util_source = UTIL_PM
-        current.util = current.pm_active
+        # No busy time from the driver. Runtime-PM share is not a usable proxy:
+        # gaps shorter than autosuspend_delay_ms never suspend (reads 100%), and
+        # when they do suspend the kernel books the ~100 ms suspend/resume
+        # transitions as active time (also ~100%). Measured on NPU Phoenix.
+        current.util_source = UTIL_UNAVAILABLE
+        current.util = nan
     else:
         current.util_source = UTIL_NONE
         current.util = 0.0
@@ -226,12 +231,12 @@ class Monitor:
         history_len: int = 600,
         use_ioctl: bool = True,
         ioctl_timeout: float = 3.0,
-        ctx_every: int = 5,
+        ctx_every: int = 1,
         util_source: str = "auto",
     ) -> None:
         self.static = dev
         self.ctx_every = max(1, ctx_every)
-        self.forced_source = util_source  # "auto", UTIL_FDINFO or UTIL_PM
+        self.forced_source = util_source  # "auto", "fdinfo" or "off" (pretend no busy time)
         self.ioctl = IoctlCollector(dev, timeout=ioctl_timeout, enabled=use_ioctl)
         self.previous: Sample | None = None
         self.current: Sample | None = None
@@ -240,7 +245,8 @@ class Monitor:
         self._self_pid = os.getpid()
         # Learned from the first client seen: does this driver export busy time?
         # A forced source pins it up front.
-        self.fdinfo_busy: bool | None = {UTIL_FDINFO: True, UTIL_PM: False}.get(util_source)
+        self.fdinfo_busy: bool | None = {"fdinfo": True, "off": False}.get(util_source)
+        self.cmd_history: deque[float] = deque(maxlen=history_len)
         self._polls = 0
 
     def poll(self) -> Sample:
@@ -250,9 +256,9 @@ class Monitor:
         if self.fdinfo_busy is None and fdinfo.processes:
             self.fdinfo_busy = any(p.has_engine_stats for p in fdinfo.processes.values())
         have_clients = bool(fdinfo.processes or fdinfo.denied_pids or fdinfo.unreadable_fd_dirs)
-        # In PM-derived mode our own ioctl wakes the device and inflates the number,
-        # so only refresh the context table every few polls there.
-        want_ctx = have_clients and (self.fdinfo_busy is not False or self._polls % self.ctx_every == 0)
+        # Each context query wakes the device and shows up in PM%; --ctx-every lets
+        # users trade CMD/s freshness for fewer wakeups.
+        want_ctx = have_clients and self._polls % self.ctx_every == 0
         self._polls += 1
         if want_ctx:
             ioctl = self.ioctl.sample(True)
@@ -268,7 +274,8 @@ class Monitor:
         derive(sample, self.current, self.static.columns, self.fdinfo_busy)
         self.previous, self.current = self.current, sample
         if self.previous is not None:
-            self.history.append(sample.util)
+            self.history.append(sample.util if sample.has_util else 0.0)
+            self.cmd_history.append(sample.cmds_per_s)
             self.pm_history.append(sample.pm_active)
         return sample
 

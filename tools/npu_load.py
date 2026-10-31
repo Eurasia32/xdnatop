@@ -29,6 +29,7 @@ def main() -> int:
     p.add_argument(
         "--duty", type=float, default=1.0, help="fraction of time to submit (0..1); sleeps the rest per 100ms slot"
     )
+    p.add_argument("--gap-ms", type=float, default=0.0, help="fixed idle gap between batches, in ms (bursty workloads)")
     p.add_argument("--xrt-python", default="/opt/xilinx/xrt/python")
     p.add_argument("--device", type=int, default=0)
     args = p.parse_args()
@@ -66,6 +67,8 @@ def main() -> int:
         for r in runs:
             r.wait2()
             done += 1
+        if args.gap_ms > 0:
+            time.sleep(args.gap_ms / 1000.0)
         if args.duty < 1.0:
             busy = time.monotonic() - slot
             time.sleep(max(0.0, busy * (1.0 - args.duty) / max(args.duty, 1e-3)))

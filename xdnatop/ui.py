@@ -8,7 +8,7 @@ import os
 import signal
 import time
 
-from .model import PM_AUTOSUSPEND_HINT_MS, UTIL_FDINFO, UTIL_PM, Monitor, ProcessRow, Sample
+from .model import UTIL_FDINFO, UTIL_UNAVAILABLE, Monitor, ProcessRow, Sample
 
 BLOCKS = " ▁▂▃▄▅▆▇█"
 
@@ -154,10 +154,13 @@ def draw(stdscr: curses.window, mon: Monitor, sample: Sample, colors: Colors, in
     _box(stdscr, 1, mx, card_h, mw, "Utilization")
     bw = max(10, mw - 24)
     src = sample.util_source
-    npu_label = "NPU  " if src == UTIL_FDINFO else "NPU* " if src == UTIL_PM else "NPU? "
+    npu_label = "NPU  " if src == UTIL_FDINFO else "NPU  " if src == UTIL_UNAVAILABLE else "NPU? "
     _put(stdscr, 2, mx + 2, npu_label, curses.A_BOLD)
-    _put(stdscr, 2, mx + 7, f"{sample.util:5.1f}% ", colors.pct(sample.util))
-    _put(stdscr, 2, mx + 15, bar(sample.util, bw), colors.pct(sample.util))
+    if sample.has_util:
+        _put(stdscr, 2, mx + 7, f"{sample.util:5.1f}% ", colors.pct(sample.util))
+        _put(stdscr, 2, mx + 15, bar(sample.util, bw), colors.pct(sample.util))
+    else:
+        _put(stdscr, 2, mx + 7, "  n/a   driver exports no NPU busy time", curses.A_DIM)
     _put(stdscr, 3, mx + 2, "COLS ", curses.A_BOLD)
     _put(stdscr, 3, mx + 7, f"{sample.column_util:5.1f}% ", colors.pct(sample.column_util))
     _put(stdscr, 3, mx + 15, bar(sample.column_util, bw), colors.pct(sample.column_util))
@@ -167,36 +170,31 @@ def draw(stdscr: curses.window, mon: Monitor, sample: Sample, colors: Colors, in
     _put(stdscr, 5, mx + 2, clip(f"CMD/s {sample.cmds_per_s:8.1f}   (completed commands, all contexts)", mw - 4))
     if src == UTIL_FDINFO:
         note = "NPU%  = Δ drm-engine busy time / wall time (fdinfo, exact)"
-    elif src == UTIL_PM:
-        note = "NPU*  = runtime-PM active share; driver has no fdinfo busy time"
-        delay = sample.pm.autosuspend_delay_ms
-        if delay > PM_AUTOSUSPEND_HINT_MS:
-            note2 = f"autosuspend_delay_ms={delay}: NPU* includes a {delay}ms idle tail per burst; lower it as root"
-        else:
-            note2 = f"autosuspend_delay_ms={delay}"
+    elif src == UTIL_UNAVAILABLE:
+        note = "NPU%  needs fdinfo busy time: kernel 7.4+ or DKMS. See CMD/s"
     else:
         note = "NPU?  = no NPU client seen yet; source decided on first client"
     _put(stdscr, 6, mx + 2, clip(note, mw - 4))
-    if src == UTIL_PM:
-        _put(
-            stdscr,
-            7,
-            mx + 2,
-            clip(note2, mw - 4),
-            colors.pct(100) if sample.pm.autosuspend_delay_ms > PM_AUTOSUSPEND_HINT_MS else 0,
-        )
-    else:
-        _put(stdscr, 7, mx + 2, clip("COLS% = AIE columns held by active hw contexts", mw - 4))
-    _put(stdscr, 8, mx + 2, clip("PM%   = PCI runtime-active share of interval (sysfs)", mw - 4))
+    _put(stdscr, 7, mx + 2, clip("COLS% = AIE columns held by active hw contexts", mw - 4))
+    _put(stdscr, 8, mx + 2, clip("PM%   = runtime-active share (sysfs), incl. monitor wakeups", mw - 4))
 
     # History ----------------------------------------------------------------
     gy = card_h + 1
     gh = max(4, min(10, (h - gy - 8) // 2))
-    _box(stdscr, gy, 0, gh + 2, w, "NPU utilization history")
-    for i, line in enumerate(sparkline(list(mon.history), w - 4, gh)):
-        _put(stdscr, gy + 1 + i, 2, line, colors.pct(sample.util))
-    _put(stdscr, gy + 1, w - 6, "100%")
-    _put(stdscr, gy + gh, w - 6, "  0%")
+    if sample.util_source == UTIL_UNAVAILABLE:
+        peak = max(mon.cmd_history, default=0.0) or 1.0
+        series = [v * 100.0 / peak for v in mon.cmd_history]
+        _box(stdscr, gy, 0, gh + 2, w, f"CMD/s history (peak {peak:.0f})")
+        top, attr = f"{peak:.0f}", colors.accent
+    else:
+        series = list(mon.history)
+        _box(stdscr, gy, 0, gh + 2, w, "NPU utilization history")
+        top, attr = "100%", colors.pct(sample.util if sample.has_util else 0.0)
+    label_w = len(top) + 1  # keep the axis labels clear of the newest bars
+    for i, line in enumerate(sparkline(series, w - 4 - label_w, gh)):
+        _put(stdscr, gy + 1 + i, 2, line, attr)
+    _put(stdscr, gy + 1, w - 2 - len(top), top)
+    _put(stdscr, gy + gh, w - 3, "0")
 
     # Processes --------------------------------------------------------------
     py = gy + gh + 2

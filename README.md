@@ -38,35 +38,31 @@ It reads the same kernel interfaces nvtop uses for GPUs instead of parsing `xrt-
 
 ## Metrics
 
-- **NPU%** is the share of wall time the driver had at least one job in flight. Its source depends
-  on what the driver exports, shown next to the meter:
-  - `NPU` (fdinfo, exact): `Δ drm-engine-* / Δt` per client; the device value is the sum, capped
-    at 100. The engine key is `npu` on the in-tree driver (kernel 7.4+) and `npu-amdxdna` or
-    `amdxdna_accel_driver` on the xrt-amdxdna DKMS builds; all are handled.
-  - `NPU*` (runtime-PM derived): used when fdinfo has no busy time (in-tree 6.14 to 7.3). The driver
-    holds a runtime-PM reference per in-flight job, so the PCI device's active share approximates
-    busy time plus one `autosuspend_delay_ms` idle tail per burst. The default delay is 5000 ms,
-    which makes the number nearly meaningless; as root, `echo 20 > /sys/class/accel/accel0/device/power/autosuspend_delay_ms`
-    brings it close to real utilization. Device level only; per-process NPU% shows `-`.
-    In this mode the hardware-context query is issued only every `--ctx-every` polls so the
-    monitor's own device wakeups stay small.
-  - `NPU?`: no NPU client has been seen yet, the source is decided on the first one.
+- **NPU%** is the share of wall time the driver had at least one job in flight for a client:
+  `Δ drm-engine-* / Δt` per client from DRM fdinfo; the device value is the sum, capped at 100.
+  The engine key is `npu` on the in-tree driver (kernel 7.4+) and `npu-amdxdna` or
+  `amdxdna_accel_driver` on the xrt-amdxdna DKMS builds; all are handled. On drivers without the
+  export (in-tree 6.14 to 7.3) the meter reads `n/a`, the history graph switches to CMD/s, and the
+  source is shown as `unavailable`. `xdnatop --util-source off` forces that mode for testing.
 - **CMD/s** is completed commands per second from the hardware-context counters, per process and
   device-wide. It is throughput, not a time share, and works on every driver version.
 - **COLS%** is the fraction of AIE columns currently held by active hardware contexts.
-- **PM%** is the share of the interval the PCI device was runtime-active, from sysfs. Every amdxdna
-  ioctl resumes the device, so with ioctl queries enabled PM% reflects the monitor's own wakeups too.
-  `xdnatop` only issues the hardware-context query while some process holds the device open; use
-  `--no-ioctl` for a zero-interference view.
+- **PM%** is the share of the interval the PCI device was runtime-active, from sysfs. It includes
+  the monitor's own wakeups (every hardware-context query resumes the device; `--ctx-every N` or
+  `--no-ioctl` reduce them). It is not a utilization proxy: gaps shorter than
+  `autosuspend_delay_ms` never suspend the device, and when gaps are longer the kernel books the
+  roughly 100 ms suspend and resume transitions as active time. Measured on NPU Phoenix, PM% read
+  100 at every duty cycle from 20% to 100%, and lowering `autosuspend_delay_ms` to 20 cut a bursty
+  workload from 32000 to 240 commands per second. Leave the delay alone.
 
 Power is not shown: the `SENSORS` query returns no valid reading on current firmware and
 `xrt-smi` reports `Estimated Power: N/A` for the same reason.
 
 ## Requirements
 
-- Linux with the `amdxdna` driver: in-tree (kernel 6.14+) or the `xrt-amdxdna` DKMS build. Exact
-  per-process NPU% needs the fdinfo busy-time export (DKMS, or in-tree from 7.4); older in-tree
-  kernels get the PM-derived device number and CMD/s.
+- Linux with the `amdxdna` driver: in-tree (kernel 6.14+) or the `xrt-amdxdna` DKMS build. NPU%
+  needs the fdinfo busy-time export (DKMS, or in-tree from 7.4); older in-tree kernels get the
+  context table, memory and CMD/s but no NPU%.
 - Python 3.10+. No third-party packages.
 
 ## Usage
@@ -100,7 +96,12 @@ load from `tools/npu_load.py` (the xrt-smi throughput recipe replayed for a chos
 | 8 in flight, 50% duty | 40.2 | 13290 | 13288 |
 
 COLS% read 100 (all 5 columns held by the one context); `k` + `y` in the TUI terminated the load
-process through its pidfd.
+process through its pidfd. Two concurrent generators were split correctly per process.
+
+The in-tree 7.3 driver was loaded on the same machine to test the no-busy-time path: xdnatop ran
+(source `unavailable`), but the XRT 2.21 user space could not execute commands on it (mailbox
+callback `-22`, TDR timeouts), so that path is covered by `--util-source off` on the DKMS driver
+and by unit tests only.
 
 ## Development
 
@@ -114,7 +115,7 @@ generator with the Python build that matches `/opt/xilinx/xrt/python`:
 
 ```sh
 mkdir /tmp/bins && (cd /tmp/bins && ar x /opt/xilinx/xrt/share/amdxdna/bins/xrt_smi_phx.a)
-python3.13 tools/npu_load.py --bins /tmp/bins --seconds 30 --duty 0.5
+python3.13 tools/npu_load.py --bins /tmp/bins --seconds 30 --duty 0.5   # or --gap-ms 100 for bursts
 ```
 
 ### xrt-amdxdna 2.21 on kernel 7.3+
